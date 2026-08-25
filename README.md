@@ -13,41 +13,43 @@
 ## 快速开始
 
 ```powershell
-cd D:\文档\workbuddy\Daliy\hosts
-
-# 1) 启用加速（需管理员，弹一次 UAC）
-python .\hosts_accel.py start
-
-# 2) 重要：刷新 DNS 并完全重启 Chrome（或 chrome://net-internals/#dns → Clear host cache）
-ipconfig /flushdns
-
-# 3) 查看加速状态 / 实时流量监控（Ctrl+C 自动 stop 并退出）
-python .\hosts_accel.py status
+# 直接运行 = 自动加速（DoH 解析）→ 实时监控 → Ctrl+C 自动清理
 python .\hosts_accel.py
 ```
+
+运行后会自动：
+1. 通过 **DoH（DNS-over-HTTPS）** 解析全部域名（默认 DNSPod）
+2. 写入 hosts 加速条目（首次需确认 UAC 提权）
+3. 刷新 DNS 缓存（`ipconfig /flushdns`）
+4. 进入流量实时监控模式
+5. Ctrl+C 退出时自动移除 hosts 条目 + 刷新 DNS
 
 ## 命令一览
 
 | 命令 | 说明 |
 |---|---|
-| `python .\hosts_accel.py` | **默认 = 实时流量监控**：先打印全部监测 IP，再对"实时连接表"原地刷新（不刷屏）；Ctrl+C = 执行 stop 退出 |
+| `python .\hosts_accel.py` | **默认 = 自动加速（DoH）→ 实时监控 → Ctrl+C 自动清理** |
+| `python .\hosts_accel.py --doh-server 3` | 指定阿里云 DoH 端点 |
 | `list` | 列出加速域名清单 |
-| `status` | 查看 hosts 中当前加速条目 |
-| `start` | 解析域名并把结果写入 hosts（需管理员） |
-| `start --ip github.com=140.82.112.4` | 手动指定优选 IP（可多次 `--ip`） |
-| `start --dry-run` | 预演，只打印将写入的内容 |
+| `status` | 查看当前 hosts 加速条目 |
 | `stop` | 移除本工具添加的条目（需管理员） |
 | `stop --dry-run` | 预演 |
-| `--interval 3` | 监控刷新间隔（秒，默认 2），与 `--no-clear` 同为全局参数 |
+| `doh-list` | 列出可用 DoH 端点 |
+| `--doh-server URL或索引` | 指定 DoH 端点（索引 0-9 或完整 URL） |
+| `--interval 3` | 监控刷新间隔（秒，默认 2） |
 | `--no-clear` | 禁用原地刷新，改为逐帧追加输出（适合重定向/日志） |
 
-> 直接运行 `.py` 无参数时，也可指定 `python .\hosts_accel.py --interval 1 --no-clear`。
+## 指定 DoH 端点
+
+```powershell
+python .\hosts_accel.py --doh-server 3            # 索引 3 = 阿里云 DNS
+python .\hosts_accel.py --doh-server "https://dns.alidns.com/resolve"  # 完整 URL
+python .\hosts_accel.py doh-list                  # 查看所有可用端点
+```
 
 ## 配置：优选 IP（可选）
-默认把域名解析为**当前 DNS 结果**固化（防污染/抖动）。想指定真正的"优选 IP"：
 
-- 命令行：`start --ip github.com=140.82.112.4 --ip raw.githubusercontent.com=185.199.108.133`
-- 或编辑同目录 `ips.conf`（每行 `域名=IP`，`#` 开头为注释）：
+默认使用 DoH 解析获取 IP。想手动指定优选 IP，编辑同目录 `ips.conf`（每行 `域名=IP`，`#` 开头为注释）：
 
 ```
 # ips.conf 示例
@@ -62,32 +64,35 @@ raw.githubusercontent.com=185.199.108.133
 - **开发者生态**：hub.docker.com、huggingface.co、greasyfork.org
 
 ## 工作原理
-1. `start` 解析全部 21 个域名（或 `ips.conf`/`--ip` 覆盖）→ 生成 `域名 → IP` 条目；
+1. 运行脚本 → 自动通过 DoH 解析全部 21 个域名（或 `ips.conf` 覆盖）→ 生成 `域名 → IP` 条目；
 2. 写入 hosts 的**标记块**之间（`# ===== WorkBuddy Hosts Accelerator START/END =====`）；
 3. 写入前自动备份到 `C:\Windows\System32\drivers\etc\hosts.hosts.bak`；
-4. `stop` / 监控 Ctrl+C：只删除标记块，**绝不触碰 hosts 其它内容**；用 `latin-1` 无损读写，保留 UTF-8 BOM。
-
-监控统计到加速 IP 的 **TCP（ESTABLISHED/SYN_SENT/CLOSE_WAIT）+ UDP（QUIC/HTTP3）** 连接，Chrome 访问 GitHub 的 UDP 流量也能看到。
+4. 自动刷新 DNS 缓存；
+5. 进入实时监控模式，统计到加速 IP 的 TCP（ESTABLISHED/SYN_SENT/CLOSE_WAIT）+ UDP（QUIC/HTTP3）连接；
+6. Ctrl+C 退出时自动移除标记块 + 刷新 DNS。
 
 ## ⚠️ 重要注意事项
 1. **启用后必须重启 Chrome**：Chrome 的「安全 DNS（DoH）」有独立缓存，不重启会继续连旧 IP，导致"看起来没生效"。
 2. **不要与 Steam++ 同时开**：Steam++ 退出时会重写/还原 hosts，会抹掉本工具的条目；两个工具会互相覆盖。规则：二选一，切换前先 `stop` 对方的。
 3. **监控看到的 IP 会变**：每次启动实时解析，DNS 轮询会让数值略有不同（正常现象）。
-4. **DoH 差异**：Chrome 用 DoH 解析出的某些 GitHub IP（如 140.82.x）本地 DNS 不返回时，监控可能监不到那部分连接；启用 hosts 固定 + 重启 Chrome 后可消除大部分差异。
-5. **管理员权限**：`start`/`stop` 需要管理员；监控本身不需要（但非管理员时 Ctrl+C 无法直接移除条目，会提示你用管理员跑 `stop`）。
+4. **管理员权限**：首次写入 hosts 需要管理员权限（自动弹 UAC）；监控本身不需要，但 Ctrl+C 自动清理需要管理员权限（已提权进程不受影响）。
 
-## 常见问题
-| 现象 | 处理 |
-|---|---|
-| 监控"没有输出" | 已修复：脚本按行刷新输出，任何环境即时显示 |
-| 监控"刷屏" | 已修复：目标清单只打印一次，仅实时连接表原地刷新 |
-| 访问 GitHub 监控无连接 | ① 确认 hosts 有加速块（`status`）；② 重启 Chrome；③ 刷新 DNS |
-| 加速"失效" | 检查 `status` 是否还有条目；若被 Steam++ 覆盖，`stop` 后重新 `start` |
+## 可用 DoH 端点
+| 索引 | 端点 | 提供商 |
+|---|---|---|
+| 0 | https://1.12.12.12/resolve | DNSPod |
+| 1 | https://doh.pub/resolve | DNSPod |
+| 2 | https://120.53.53.53/resolve | DNSPod |
+| 3 | https://dns.alidns.com/resolve | 阿里云 |
+| 4 | https://223.6.6.6/resolve | DNSPod |
+| 5 | https://223.5.5.5/resolve | 阿里云 |
+| 6 | https://dns.google/resolve | Google |
+| 7 | https://doh.360.cn/resolve | 360 |
+| 8 | https://cloudflare-dns.com/resolve | Cloudflare |
+| 9 | https://101.6.6.6:8443/resolve | CNNIC |
 
 ## 安全说明
 - 只修改自己标记块内的内容，不碰其它行；
 - 每次写入自动备份，`stop` 可完整回滚；
 - **不安装根证书、不做代理/中间人**，相比 Steam++ 的 Proxy 模式风险面小得多；
-- 建议只在可信环境下使用，并把 hosts 备份（`hosts\hosts.backup-20260811`）妥善保管。
-# Github_host-
-# Github_host-
+- 建议只在可信环境下使用，并把 hosts 备份妥善保管。

@@ -7,24 +7,25 @@ Hosts 模式加速器 —— GitHub 开发者生态（纯 hosts 方案，无代�
 相比 Watt Toolkit 的 Proxy 模式更轻、更安全（不安装根证书、不解密流量）。
 
 用法（Windows 下写入需要管理员权限，脚本会自动请求提权）：
-    python hosts_accel.py                      # 无参数 = 流量实时监控（Ctrl+C 停止并退出；非管理员会提示运行 stop）
+    python hosts_accel.py                      # 默认：自动加速（DoH）→ 实时监控 → Ctrl+C 自动清理
+    python hosts_accel.py --doh-server 3        # 指定阿里云 DoH 端点
     python hosts_accel.py list                 # 列出加速域名清单
     python hosts_accel.py status               # 查看当前 hosts 加速状态
-    python hosts_accel.py start                # 解析域名并把结果固化进 hosts
-    python hosts_accel.py start --ip github.com=140.82.112.4 --ip raw.githubusercontent.com=185.199.108.133
-    python hosts_accel.py start --dry-run      # 预演，只打印将写入的内容
     python hosts_accel.py stop                 # 移除本工具添加的条目
     python hosts_accel.py stop --dry-run
+    python hosts_accel.py doh-list             # 列出可用 DoH 端点
 
 说明：
-- 不带 --ip 时，默认把清单内域名解析为"当前 DNS 结果"并固化（防 DNS 污染/抖动）。
-  想要真正的"优选 IP"，用 --ip 指定，或编辑本脚本同目录下的 ips.conf（每行 domain=ip）。
+- 默认使用 DoH（DNS-over-HTTPS）解析，避免本地 DNS 污染/抖动。
+- 可通过 --doh-server 指定其他 DoH 端点（索引或完整 URL）。
+- 也可编辑同目录下的 ips.conf（每行 domain=ip）手动指定 IP。
 - 只增删自己的标记块（START/END 注释之间），绝不修改 hosts 其它内容；
   每次写入前自动备份到 hosts.bak。
 """
 
 import argparse
 import ipaddress
+import json
 import os
 import re
 import shutil
@@ -32,6 +33,8 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.request
+import urllib.parse
 from pathlib import Path
 
 # ---------------- 配置 ----------------
@@ -62,6 +65,20 @@ DOMAINS = [
 
 # 同目录下的优选 IP 配置文件（可选）：每行 domain=ip
 CONF_FILE = Path(__file__).resolve().parent / "ips.conf"
+
+# DoH（DNS-over-HTTPS）端点列表，用于 --doh 模式解析域名
+DOH_ENDPOINTS = [
+    "https://1.12.12.12/resolve",
+    "https://doh.pub/resolve",
+    "https://120.53.53.53/resolve",
+    "https://dns.alidns.com/resolve",
+    "https://223.6.6.6/resolve",
+    "https://223.5.5.5/resolve",
+    "https://dns.google/resolve",
+    "https://doh.360.cn/resolve",
+    "https://cloudflare-dns.com/resolve",
+    "https://101.6.6.6:8443/resolve",
+]
 
 
 # ---------------- 权限与提权 ----------------
@@ -118,13 +135,36 @@ def resolve(domain: str) -> list:
         return []
 
 
-def build_entries(overrides: dict) -> list:
-    """生成 [(domain, ip), ...]；优先用 override，否则用当前 DNS。"""
+def doh_resolve(domain: str, endpoint: str) -> list:
+    """使用 DoH JSON API 解析域名，返回 A 记录 IP 列表。
+
+    endpoint 示例：https://dns.alidns.com/resolve
+    使用 Google JSON API 格式：?name=DOMAIN&type=A
+    """
+    url = f"{endpoint}?name={urllib.parse.quote(domain)}&type=A"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "hosts_accel/1.0"})
+        resp = urllib.request.urlopen(req, timeout=8)
+        data = json.loads(resp.read().decode())
+        if data.get("Status") != 0:
+            return []
+        ips = []
+        for ans in data.get("Answer", []):
+            if ans.get("type") == 1:  # A 记录
+                ips.append(ans["data"])
+        return ips
+    except Exception as e:
+        print(f"  [warn] DoH 解析失败: {domain} @ {endpoint} ({e})")
+        return []
+
+
+def build_entries(overrides: dict, doh_url: str = "") -> list:
+    """生成 [(domain, ip), ...]；优先用 override，否则用当前 DNS（或 DoH 解析）。"""
     entries = []
     for d in DOMAINS:
         ip = overrides.get(d, "")
         if not ip:
-            ips = resolve(d)
+            ips = doh_resolve(d, doh_url) if doh_url else resolve(d)
             if not ips:
                 continue
             ip = ips[0]
@@ -203,9 +243,14 @@ def backup() -> Path:
     return bak
 
 
-def flush_dns_hint() -> None:
+def flush_dns() -> None:
+    """刷新系统 DNS 缓存。"""
     if os.name == "nt":
-        print("[i] 建议刷新 DNS 缓存：ipconfig /flushdns")
+        try:
+            subprocess.run(["ipconfig", "/flushdns"], capture_output=True, text=True)
+            print("[i] DNS 缓存已刷新")
+        except Exception:
+            print("[i] 建议手动刷新 DNS：ipconfig /flushdns")
 
 
 def perform_stop() -> None:
@@ -218,7 +263,7 @@ def perform_stop() -> None:
     write_hosts(remove_section(text))
     print(f"[-] 已移除加速条目 → {HOSTS_PATH}")
     print(f"[-] 备份：{bak}")
-    flush_dns_hint()
+    flush_dns()
 
 
 # ---------------- 子命令 ----------------
@@ -226,7 +271,7 @@ def cmd_list(_args) -> int:
     print(f"加速域名清单（{len(DOMAINS)} 个，GitHub 开发者生态）：")
     for i, d in enumerate(DOMAINS, 1):
         print(f"  {i:2}. {d}")
-    print(f"\n提示：可用 --ip domain=ip 或编辑 {CONF_FILE} 指定优选 IP")
+    print(f"\n提示：可编辑 {CONF_FILE} 指定优选 IP（每行 domain=ip）")
     return 0
 
 
@@ -239,35 +284,6 @@ def cmd_status(_args) -> int:
     e = text.find(MARKER_END)
     print(f"[i] 当前 hosts 加速条目（{HOSTS_PATH}）：")
     print(text[s:e + len(MARKER_END)])
-    return 0
-
-
-def cmd_start(args) -> int:
-    ov = load_overrides()
-    for kv in (args.ip or []):
-        d, _, ip = kv.partition("=")
-        ov[d.strip().lower()] = ip.strip()
-    entries = build_entries(ov)
-    if not entries:
-        print("[!] 没有可写入的条目（全部解析失败？）")
-        return 1
-
-    section = "\n".join(
-        [MARKER_START] + [f"{ip:<16} {d}" for d, ip in entries] + [MARKER_END])
-
-    if args.dry_run:
-        print("== 预演（不写入）==")
-        print(section)
-        print(f"== 共 {len(entries)} 条 ==")
-        return 0
-
-    if not is_admin():
-        print("[i] 需要管理员权限，请求提权…")
-        elevate()
-        return 0  # elevate 内部会退出，这里不会走到
-
-    write_section(entries)
-    flush_dns_hint()
     return 0
 
 
@@ -291,6 +307,43 @@ def cmd_stop(args) -> int:
 
     perform_stop()
     return 0
+
+
+def cmd_doh_list(_args) -> int:
+    print(f"可用 DoH 端点（{len(DOH_ENDPOINTS)} 个）：")
+    for i, url in enumerate(DOH_ENDPOINTS):
+        print(f"  {i}. {url}")
+    print()
+    print("直接运行脚本即自动使用 DoH（默认端点 0）：")
+    print(f"  python hosts_accel.py")
+    print(f"  python hosts_accel.py --doh-server 2   # 用索引")
+    print(f"  python hosts_accel.py --doh-server {DOH_ENDPOINTS[0]}  # 用完整 URL")
+    return 0
+
+
+def _resolve_doh_url(raw: str) -> str:
+    """解析 --doh-server 参数：索引号或完整 URL，返回完整 DoH URL。"""
+    if raw is None:
+        return DOH_ENDPOINTS[0]
+    if raw.isdigit():
+        idx = int(raw)
+        if 0 <= idx < len(DOH_ENDPOINTS):
+            return DOH_ENDPOINTS[idx]
+        print(f"[warn] 索引 {idx} 超出范围（0-{len(DOH_ENDPOINTS) - 1}），使用默认")
+        return DOH_ENDPOINTS[0]
+    return raw.rstrip("/")
+
+
+def _auto_start(doh_url: str) -> bool:
+    """自动执行加速（写入 hosts + 刷新 DNS）。返回 True 成功，False 全部失败。"""
+    overrides = load_overrides()
+    entries = build_entries(overrides, doh_url)
+    if not entries:
+        print("[!] 全部解析失败，跳过加速", flush=True)
+        return False
+    write_section(entries)
+    flush_dns()
+    return True
 
 
 # ---------------- 流量实时监控（默认模式） ----------------
@@ -348,7 +401,20 @@ def enable_ansi() -> None:
 
 
 def run_monitor(args) -> int:
-    """默认模式：实时输出到加速域名各 IP 的流量情况；Ctrl+C 时若已加速则执行 stop 后退出。"""
+    """默认模式：自动加速（DoH）→ 流量监控 → Ctrl+C 自动 stop。"""
+
+    # ===== 第一步：自动启动加速（DoH，默认 DNSPod）=====
+    if not has_section(read_hosts()):
+        if not is_admin():
+            print("[i] 需要管理员权限写入 hosts，请求提权…", flush=True)
+            elevate()
+            return 0  # elevate() 内部 exit，不会走到这里
+
+        doh_url = _resolve_doh_url(getattr(args, 'doh_server', None))
+        print(f"[i] 自动加速（DoH: {doh_url}）…", flush=True)
+        _auto_start(doh_url)
+
+    # ===== 第二步：加载监测集合 =====
     overrides = load_overrides()
 
     # 监测集合 = 每个加速域名的全部 A 记录（Chrome 可能连其中任意一个）
@@ -371,7 +437,7 @@ def run_monitor(args) -> int:
     if has_section(read_hosts()):
         print("[i] hosts 加速已启用；Ctrl+C 将执行 stop 移除加速。", flush=True)
     else:
-        print("[i] 当前未启用 hosts 加速，仅展示到上述 IP 的流量（可先运行 start 开启）。", flush=True)
+        print("[i] 当前未启用 hosts 加速，仅展示到上述 IP 的流量。", flush=True)
 
     # 目标 IP 清单只在启动时打印一次（避免每帧长列表滚动刷屏）
     def trunc(s: str, w: int) -> str:
@@ -443,20 +509,22 @@ def main() -> int:
             pass
     p = argparse.ArgumentParser(
         description="Hosts 模式加速器（GitHub 开发者生态；纯 DNS 固化，无代理/证书）。"
-                    "无参数运行时进入流量实时监控，Ctrl+C 自动执行 stop。")
+                    "无参数自动使用 DoH 加速 + 流量监控，Ctrl+C 自动清理。")
     p.add_argument("--interval", type=float, default=2.0, help="监控刷新间隔（秒，默认 2）")
     p.add_argument("--no-clear", action="store_true", help="禁用原地刷新（逐帧追加输出；默认终端下原地覆盖，不刷屏）")
+    p.add_argument("--doh-server", metavar="URL或索引", default=None,
+                    help=f"DoH 端点：URL 或索引 0-{len(DOH_ENDPOINTS) - 1}（默认 0={DOH_ENDPOINTS[0]}）。"
+                         f"用 `doh-list` 查看所有端点")
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("list", help="列出域名清单")
     sub.add_parser("status", help="查看当前 hosts 加速状态")
-    ps = sub.add_parser("start", help="写入加速条目")
-    ps.add_argument("--ip", action="append", metavar="domain=ip", help="指定域名 IP（可多次）")
-    ps.add_argument("--dry-run", action="store_true", help="只预览不写入")
     pt = sub.add_parser("stop", help="移除加速条目")
     pt.add_argument("--dry-run", action="store_true", help="只预览不写入")
+    sub.add_parser("doh-list", help="列出可用 DoH 端点")
     args = p.parse_args()
 
-    handlers = {"list": cmd_list, "status": cmd_status, "start": cmd_start, "stop": cmd_stop}
+    handlers = {"list": cmd_list, "status": cmd_status, "stop": cmd_stop,
+                 "doh-list": cmd_doh_list}
     fn = handlers.get(args.cmd)
     if fn is None:
         return run_monitor(args)   # 无参数 = 流量实时监控
