@@ -45,6 +45,10 @@ else:
 
 MARKER_START = "# ===== WorkBuddy Hosts Accelerator START ====="
 MARKER_END = "# ===== WorkBuddy Hosts Accelerator END ====="
+# 被覆盖条目的备份块（Steam++ 同款思路）：写入加速条目时把普通区同名条目
+# 以 "# <ip> <domain>" 注释形式暂存，停止加速时还原回去，避免丢用户原有配置。
+BACKUP_START = "# ===== WorkBuddy Hosts Accelerator BACKUP START ====="
+BACKUP_END = "# ===== WorkBuddy Hosts Accelerator BACKUP END ====="
 
 # 加速清单：GitHub 家族 + 开发者生态站点（与 Watt Toolkit「GitHub 加速」一致）
 DOMAINS = [
@@ -177,6 +181,61 @@ def build_entries(overrides: dict, doh_url: str = "") -> list:
     return entries
 
 
+# ---------------- hosts 读写（latin-1 无损字节往返） ----------------
+def read_hosts() -> str:
+    if not HOSTS_PATH.exists():
+        return ""
+    return HOSTS_PATH.read_bytes().decode("latin-1")
+
+
+def write_hosts(text: str) -> None:
+    HOSTS_PATH.write_bytes(text.encode("latin-1"))
+
+
+def has_section(text: str) -> bool:
+    return MARKER_START in text and MARKER_END in text
+
+
+def _block_ranges(text: str) -> list:
+    """返回文本中所有本工具块的内存范围 [(start, end), ...]（含 MARKER 与 BACKUP）。"""
+    ranges = []
+    for a, b in ((MARKER_START, MARKER_END), (BACKUP_START, BACKUP_END)):
+        s = text.find(a)
+        e = text.find(b)
+        if s != -1 and e != -1 and e > s:
+            ne = text.find("\n", e)
+            ranges.append((s, len(text) if ne == -1 else ne + 1))
+    return ranges
+
+
+def _strip_blocks(text: str) -> str:
+    """删除所有本工具块（MARKER/BACKUP），其余内容原样保留。"""
+    for s, e in sorted(_block_ranges(text), reverse=True):
+        text = text[:s] + text[e:]
+    return text
+
+
+def parse_backup(text: str) -> dict:
+    """从 BACKUP 块解析被覆盖条目 {domain: ip}。"""
+    s = text.find(BACKUP_START)
+    e = text.find(BACKUP_END)
+    if s == -1 or e == -1 or e <= s:
+        return {}
+    out = {}
+    for line in text[s:e].splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 3 and parts[0] == "#":
+            # parts[1] 必须是合法 IP，排除伪造/注释样式的行
+            if parts[1].startswith("=") or parts[1].startswith("#"):
+                continue
+            try:
+                ipaddress.ip_address(parts[1])
+            except ValueError:
+                continue
+            out[parts[2]] = parts[1]
+    return out
+
+
 def parse_section_entries(text: str) -> list:
     """从 hosts 现有的加速标记块中解析 [(domain, ip), ...]。"""
     s = text.find(MARKER_START)
@@ -194,47 +253,71 @@ def parse_section_entries(text: str) -> list:
     return out
 
 
+def parse_plain_entries(text: str) -> dict:
+    """解析加速块外普通区中的 {domain: ip}。
+
+    只取 "ip domain 行" 且此域名不在加速块内，用于写入前备份被覆盖的条目。
+    """
+    accel_block = set()
+    s = text.find(MARKER_START)
+    e = text.find(MARKER_END)
+    if s != -1 and e != -1 and e > s:
+        accel_block = {line.strip().split()[1]
+                       for line in text[s:e].splitlines()
+                       if line.strip() and not line.strip().startswith("#")
+                       and len(line.strip().split()) >= 2}
+    out = {}
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 2 or parts[0].startswith("#"):
+            continue
+        domain, ip = parts[1], parts[0]
+        if domain in accel_block:
+            continue
+        out[domain] = ip
+    return out
+
+
 def write_section(entries: list) -> None:
-    """把加速条目写入 hosts（替换旧块），写入前自动备份。"""
+    """把加速条目写入 hosts（替换旧块）。
+
+    Steam++ 同款细节：写入前先把普通区中将被覆盖的同名条目移入
+    BACKUP 块（注释行），停止加速时再还原，而不是直接丢掉。
+    """
     text = read_hosts()
-    if has_section(text):
-        text = remove_section(text)
-    section = "\n".join(
-        [MARKER_START] + [f"{ip:<16} {d}" for d, ip in entries] + [MARKER_END])
-    text = text.rstrip() + "\n\n" + section + "\n\n"
+    covered = {d for d, _ in entries}
+    backup_map = parse_backup(text)      # 继承上一次的备份（不重复备份）
+    text = _strip_blocks(text)
+
+    # 逐行扫描普通区：被覆盖域名的行移入备份并从文本删除
+    out_lines = []
+    for line in text.splitlines():
+        parts = line.strip().split()
+        is_entry = len(parts) >= 2 and not parts[0].startswith("#")
+        if is_entry and parts[1] in covered:
+            if parts[1] not in backup_map:
+                backup_map[parts[1]] = parts[0]
+            continue                     # 该行不再输出到普通区
+        out_lines.append(line)
+    text = "\n".join(out_lines).rstrip() + ("\n" if out_lines else "")
+
+    backup_lines = [f"# {ip:<15}{domain}" for domain, ip in backup_map.items()]
+    section = [MARKER_START] + [f"{ip:<16} {d}" for d, ip in entries] + [MARKER_END]
+    if backup_lines:
+        section += [BACKUP_START] + backup_lines + [BACKUP_END]
+
+    text = text.rstrip() + "\n\n" + "\n".join(section) + "\n\n"
     bak = backup()
     write_hosts(text)
     print(f"[+] 已写入 {len(entries)} 条 → {HOSTS_PATH}")
-    print(f"[+] 备份：{bak}")
-
-
-# ---------------- hosts 读写（latin-1 无损字节往返） ----------------
-def read_hosts() -> str:
-    if not HOSTS_PATH.exists():
-        return ""
-    return HOSTS_PATH.read_bytes().decode("latin-1")
-
-
-def write_hosts(text: str) -> None:
-    HOSTS_PATH.write_bytes(text.encode("latin-1"))
-
-
-def has_section(text: str) -> bool:
-    return MARKER_START in text and MARKER_END in text
+    if backup_lines:
+        print(f"[+] 已备份被覆盖的 {len(backup_lines)} 条原条目（停止加速时还原）")
+    print(f"[+] 备份文件：{bak}")
 
 
 def remove_section(text: str) -> str:
-    """只删除本工具的标记块，其余内容原样保留。"""
-    start = text.find(MARKER_START)
-    if start == -1:
-        return text
-    end = text.find(MARKER_END)
-    if end == -1:
-        return text
-    end = text.find("\n", end)
-    if end == -1:
-        end = len(text)
-    return text[:start] + text[end + 1:]
+    """删除本工具的全部块（MARKER + BACKUP），其余内容原样保留。"""
+    return _strip_blocks(text)
 
 
 def backup() -> Path:
@@ -254,15 +337,29 @@ def flush_dns() -> None:
 
 
 def perform_stop() -> None:
-    """实际移除加速条目（不检查权限，调用方保证已提权）。"""
+    """实际移除加速条目，并还原备份块中的被覆盖条目（调用方保证已提权）。"""
     text = read_hosts()
     if not has_section(text):
         print("[i] 无本工具条目，无需处理")
         return
     bak = backup()
-    write_hosts(remove_section(text))
+    old_backup = parse_backup(text)
+    cleaned = remove_section(text)
+
+    # 还原：备份条目写回普通区，条件是不与当前普通区已有条目冲突
+    restored_lines = []
+    current = parse_plain_entries(cleaned)
+    for domain, ip in old_backup.items():
+        if domain not in current:
+            restored_lines.append(f"{ip:<16} {domain}")
+    if restored_lines:
+        cleaned = cleaned.rstrip() + "\n\n" + "\n".join(restored_lines) + "\n\n"
+
+    write_hosts(cleaned)
     print(f"[-] 已移除加速条目 → {HOSTS_PATH}")
-    print(f"[-] 备份：{bak}")
+    if restored_lines:
+        print(f"[-] 已还原被覆盖的 {len(restored_lines)} 条原配置")
+    print(f"[-] 备份文件：{bak}")
     flush_dns()
 
 
@@ -346,6 +443,39 @@ def _auto_start(doh_url: str) -> bool:
     return True
 
 
+def _repair_hosts_if_tampered(doh_url: str) -> None:
+    """检测 hosts 加速块是否被外部软件改写/删除，是则自动重建。
+
+    对应 Steam++ 的 FileSystemWatcher 轮询版：加速运行期间若被其他加速器、
+    杀软或用户手动改动（块缺失、域名条目缺失），检测到后自动写回，
+    避免加速静默失效。非管理员/解析失败时仅提示不强行写入。
+    """
+    text = read_hosts()
+    if not has_section(text):
+        # 块整个没了：说明加速条目被外部移除，主动重建（若之前本就启用）
+        print("[warn] 检测到 hosts 加速块已被外部删除，自动重建…", flush=True)
+        if is_admin():
+            _auto_start(doh_url)
+        else:
+            print("[warn] 当前无管理员权限，请在管理员终端执行：python hosts_accel.py", flush=True)
+        return
+
+    # 块内域名条目缺失/计数不符 => 部分被改写，重建一次
+    overrides = load_overrides()
+    expected = set()
+    for d in DOMAINS:
+        if overrides.get(d) or resolve(d):
+            expected.add(d)
+    present = {d for d, _ in parse_section_entries(text)}
+    missing = expected - present
+    if missing:
+        print(f"[warn] 检测到 hosts 加速块被改写（缺失 {len(missing)} 个域名），自动重建…", flush=True)
+        if is_admin():
+            _auto_start(doh_url)
+        else:
+            print("[warn] 当前无管理员权限，请在管理员终端执行：python hosts_accel.py", flush=True)
+
+
 # ---------------- 流量实时监控（默认模式） ----------------
 def get_established_to(ip_set: set, raw_out: str = None) -> tuple:
     """返回 ({目标IP: 连接数}, 错误信息)。
@@ -404,13 +534,13 @@ def run_monitor(args) -> int:
     """默认模式：自动加速（DoH）→ 流量监控 → Ctrl+C 自动 stop。"""
 
     # ===== 第一步：自动启动加速（DoH，默认 DNSPod）=====
+    doh_url = _resolve_doh_url(getattr(args, 'doh_server', None))
     if not has_section(read_hosts()):
         if not is_admin():
             print("[i] 需要管理员权限写入 hosts，请求提权…", flush=True)
             elevate()
             return 0  # elevate() 内部 exit，不会走到这里
 
-        doh_url = _resolve_doh_url(getattr(args, 'doh_server', None))
         print(f"[i] 自动加速（DoH: {doh_url}）…", flush=True)
         _auto_start(doh_url)
 
@@ -455,8 +585,16 @@ def run_monitor(args) -> int:
         enable_ansi()
 
     prev_n = 0
+    check_interval = max(15.0, interval * 4)   # hosts 篡改检测周期（至少 15s）
+    last_check = 0.0
     try:
         while True:
+            # ---- hosts 加速块完整性检查（Steam++ 同款：外部改写了 hosts 自动重建） ----
+            now = time.time()
+            if now - last_check >= check_interval:
+                last_check = now
+                _repair_hosts_if_tampered(doh_url)
+
             counts, err = get_established_to(pinned)
             frame = []
             frame.append(f"== 加速域名连接实时监控  [ {time.strftime('%H:%M:%S')} | 刷新 {interval}s | Ctrl+C 退出 ] ==")
