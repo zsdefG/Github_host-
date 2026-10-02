@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>AccelGui</RootNamespace>
+    <AssemblyName>AccelGui</AssemblyName>
+    <Platforms>AnyCPU;x64</Platforms>
+    <ApplicationIcon>AppIcon.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="pythonnet" Version="3.1.0" />
+    <Resource Include="AppIcon.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 托盘用 WinForms NotifyIcon，但移除其隐式全局 using，避免与 WPF 的 MessageBox/Brushes/OpenFileDialog 歧义 -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <!-- 构建后把嵌入式 Python 运行时与 hosts 脚本复制到输出目录（目标机器无需安装 Python） -->
+  <Target Name="PackEmbeddedRuntime" AfterTargets="Build" Condition="'$(TargetFramework)'=='net8.0-windows'">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)pack-runtime.ps1&quot; -TargetDir &quot;$(TargetDir.TrimEnd('\'))&quot; -ScriptRoot &quot;$(MSBuildThisFileDirectory)..&quot;" />
+  </Target>
+
+</Project>

@@ -1,0 +1,49 @@
+<Window x:Class="AccelGui.SettingsDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="设置" Width="480" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize">
+    <StackPanel Margin="14">
+        <GroupBox Header="显示模式" Margin="0,0,0,10">
+            <StackPanel Margin="8">
+                <RadioButton x:Name="ModeMinimal" Content="精简：只保留状态栏与启动/停止，隐藏配置项和 IP 表" Margin="0,0,0,6"/>
+                <RadioButton x:Name="ModeStandard" Content="标准：显示完整配置 + 日志，隐藏 IP 表" Margin="0,0,0,6"/>
+                <RadioButton x:Name="ModeFull" Content="完整：显示配置 + 日志 + 实时 IP 表（每 5 秒刷新）" Margin="0,0,0,6"/>
+                <CheckBox x:Name="AllowMultipleBox" Content="允许同时打开多个程序窗口（关闭时重复启动会激活已有窗口）"/>
+            </StackPanel>
+        </GroupBox>
+
+        <GroupBox Header="Python 解释器（python*.dll 路径）" Margin="0,0,0,14">
+            <StackPanel Margin="8">
+                <TextBlock Text="留空自动探测（注册表 PYTHONNET_PYDLL）。仅当自动探测失败时才需要手动指定。" 
+                           TextWrapping="Wrap" FontSize="11" Foreground="#888888" Margin="0,0,0,6"/>
+                <DockPanel>
+                    <Button x:Name="BrowseBtn" DockPanel.Dock="Right" Content="浏览…" Width="70" Margin="6,0,0,0" Click="OnBrowse"/>
+                    <TextBox x:Name="PythonDllBox"/>
+                </DockPanel>
+            </StackPanel>
+        </GroupBox>
+
+        <GroupBox Header="DNS over HTTPS（DoH）" Margin="0,0,0,14">
+            <StackPanel Margin="8">
+                <CheckBox x:Name="DohEnableBox" Content="启用 DoH 上游（非加速域名经 DoH 解析，失败自动回退 UDP 上游）"
+                          Margin="0,0,0,8"
+                          Checked="OnDohToggled" Unchecked="OnDohToggled"/>
+                <DockPanel Margin="0,0,0,6">
+                    <TextBlock Text="内置端点" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <ComboBox x:Name="DohServerBox" Width="330" HorizontalAlignment="Left"
+                              SelectionChanged="OnDohSelected"/>
+                </DockPanel>
+                <DockPanel>
+                    <TextBlock Text="自定义" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <TextBox x:Name="DohCustomBox"/>
+                </DockPanel>
+            </StackPanel>
+        </GroupBox>
+
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="取消" Width="80" IsCancel="True" Margin="0,0,8,0"/>
+            <Button Content="保存" Width="80" IsDefault="True" Click="OnSave"/>
+        </StackPanel>
+    </StackPanel>
+</Window>
