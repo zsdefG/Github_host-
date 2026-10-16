@@ -24,9 +24,17 @@
     <Using Remove="System.Drawing" />
   </ItemGroup>
 
-  <!-- 构建后把嵌入式 Python 运行时与 hosts 脚本复制到输出目录（目标机器无需安装 Python） -->
+  <!-- 构建后把嵌入式 Python 运行时与 hosts 脚本复制到输出目录（目标机器无需安装 Python）。
+       $(EmbeddedPythonDir) 可选：多架构打包时显式指定 Python 安装目录（如 x86 打包指向 x86 Python），
+       为空时脚本回退到 PATH 探测构建机默认 Python。 -->
   <Target Name="PackEmbeddedRuntime" AfterTargets="Build" Condition="'$(TargetFramework)'=='net8.0-windows'">
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)pack-runtime.ps1&quot; -TargetDir &quot;$(TargetDir.TrimEnd('\'))&quot; -ScriptRoot &quot;$(MSBuildThisFileDirectory)..&quot;" />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)pack-runtime.ps1&quot; -TargetDir &quot;$(TargetDir.TrimEnd('\'))&quot; -ScriptRoot &quot;$(MSBuildThisFileDirectory)..&quot; -PythonDir &quot;$(EmbeddedPythonDir)&quot;" />
+  </Target>
+
+  <!-- publish 阶段 AfterBuild 添加的运行时/hosts 文件不在 MSBuild 复制清单内，
+       需对发布目录（$(PublishDir)）再跑一次打包，确保 -o 输出完整包含嵌入式运行时。 -->
+  <Target Name="PackEmbeddedRuntimePublish" AfterTargets="Publish" Condition="'$(TargetFramework)'=='net8.0-windows' AND '$(PublishDir)'!=''">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)pack-runtime.ps1&quot; -TargetDir &quot;$(PublishDir.TrimEnd('\'))&quot; -ScriptRoot &quot;$(MSBuildThisFileDirectory)..&quot; -PythonDir &quot;$(EmbeddedPythonDir)&quot;" />
   </Target>
 
 </Project>

@@ -389,7 +389,21 @@ public partial class MainWindow : Window
         }
     }
 
-    private void StopAndCleanup()
+    /// <summary>
+    /// 关机 / 注销 / 重启前同步清理（App.OnSessionEnding 调用）。
+    /// 置 _realExit 让 OnClosing 走真正退出路径（而不是"点 × 隐藏到托盘"的
+    /// e.Cancel=true 拦截），并立即停止服务/还原系统代理——避免 Windows 超时
+    /// 强杀进程后代理残留。
+    /// </summary>
+    internal void PrepareForSessionEnd()
+    {
+        _realExit = true;
+        _ipTimer.Stop();
+        StopAndCleanup();
+    }
+
+    /// <summary>停止服务并还原系统代理（幂等；_handle 为空时直接返回）。</summary>
+    internal void StopAndCleanup()
     {
         if (_handle != null)
         {

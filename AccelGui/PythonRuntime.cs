@@ -49,6 +49,16 @@ public static class PythonRuntime
         return (dll, root);
     }
 
+    /// <summary>
+    /// 禁止 CPython 在源文件旁生成 __pycache__\*.pyc 字节码缓存：
+    /// 安装目录（如 hosts\）往往可写，运行一次就会留下缓存目录，保持安装目录干净。
+    /// 必须在 PythonEngine.Initialize() 之前调用。
+    /// </summary>
+    private static void DisableBytecodeCache()
+    {
+        Environment.SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "1");
+    }
+
     /// <summary>尝试定位 Python DLL（pythonnet 的 Runtime.PythonDLL 必须是完整路径）。</summary>
     /// <param name="manualOverride">用户在设置里手动指定的完整路径；为空则自动探测。</param>
     public static string? LocatePythonDll(string? manualOverride = null)
@@ -106,6 +116,7 @@ public static class PythonRuntime
                     // 嵌入式运行时的标准库 Lib\ 与扩展 DLLs\ 都在 Home 下，必须显式指定 PYTHONHOME，
                     // 否则 CPython 会去注册表/默认路径找标准库而失败。
                     Environment.SetEnvironmentVariable("PYTHONHOME", bundled.Value.Home);
+                    DisableBytecodeCache();
                     PythonEngine.Initialize();
                     _threadState = PythonEngine.BeginAllowThreads();
                     _initialized = true;
@@ -118,6 +129,7 @@ public static class PythonRuntime
                     "未找到 Python 3.10-3.14 运行库（python*.dll）。请在“设置”里手动指定 Python DLL 路径。");
 
             Runtime.PythonDLL = dll;
+            DisableBytecodeCache();
             PythonEngine.Initialize();
             _threadState = PythonEngine.BeginAllowThreads();
             _initialized = true;

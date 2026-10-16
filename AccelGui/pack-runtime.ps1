@@ -4,20 +4,26 @@
 #   powershell -File pack-runtime.ps1 -TargetDir <输出目录> -ScriptRoot <hosts 目录>
 param(
     [Parameter(Mandatory = $true)][string]$TargetDir,
-    [Parameter(Mandatory = $true)][string]$ScriptRoot
+    [Parameter(Mandatory = $true)][string]$ScriptRoot,
+    # 显式指定 Python 安装目录（多架构打包时用，如 x86 打包指向 x86 Python）。
+    # 为空时回退到 PATH 探测（单架构机器上的默认行为）。
+    [string]$PythonDir = ''
 )
 $ErrorActionPreference = 'Stop'
 
 function Write-Step([string]$msg) { Write-Host "[pack-runtime] $msg" -ForegroundColor Cyan }
 
-# 1) 探测构建机上的 Python（路径动态获取，不写死）。构建机没有 Python 时跳过嵌入式运行时，
-#    程序仍可回退到系统 Python（仅构建机环境受影响）。
+# 1) 定位要打包的 Python：-PythonDir 优先，否则 PATH 探测（路径动态获取，不写死）。
 $pyDir = $null
-$pyCmd = Get-Command python -ErrorAction SilentlyContinue
-if ($pyCmd) {
-    try {
-        $pyDir = (& python -c "import sys,os;print(os.path.dirname(sys.executable))" 2>$null).Trim()
-    } catch { $pyDir = $null }
+if ($PythonDir) {
+    $pyDir = $PythonDir
+} else {
+    $pyCmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($pyCmd) {
+        try {
+            $pyDir = (& python -c "import sys,os;print(os.path.dirname(sys.executable))" 2>$null).Trim()
+        } catch { $pyDir = $null }
+    }
 }
 if (-not $pyDir -or -not (Test-Path (Join-Path $pyDir 'python3*.dll'))) {
     Write-Warning "未找到可用的 Python 安装，跳过嵌入式运行时打包（程序将回退到系统 Python）。"
@@ -66,12 +72,22 @@ if ($pyDir) {
 # 2.5) VC++ 运行库（python3xx.dll 的依赖，如 vcruntime140.dll / vcruntime140_1.dll）
 #      Windows Sandbox 等干净系统默认没有 VC++ Redistributable，python DLL 加载失败时
 #      pythonnet 会抛 "The type initializer for 'Delegates' threw an exception"。
-#      从构建机 System32 探测分发到：应用根目录（标准 DLL 搜索优先）+ python DLL 同目录（双保险）。
+#      优先取 Python 安装目录内的同名运行库（其架构与 python DLL 一致——x86 Python 自带 x86 版
+#      vcruntime；x64 版 Python 目录一般没有，回退 System32）。分发到：
+#      应用根目录（标准 DLL 搜索优先）+ python DLL 同目录（双保险）。
 $sys32 = Join-Path $env:SystemRoot 'System32'
 $vcCopied = @()
 foreach ($vcName in @('vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll')) {
-    $vcSrc = Join-Path $sys32 $vcName
-    if (Test-Path $vcSrc) {
+    $vcSrc = $null
+    if ($pyDir) {
+        $p = Join-Path $pyDir $vcName
+        if (Test-Path $p) { $vcSrc = $p }
+    }
+    if (-not $vcSrc) {
+        $p = Join-Path $sys32 $vcName
+        if (Test-Path $p) { $vcSrc = $p }
+    }
+    if ($vcSrc) {
         Copy-Item $vcSrc (Join-Path $TargetDir $vcName) -Force
         if ($pyDst) { Copy-Item $vcSrc (Join-Path $pyDst $vcName) -Force }
         $vcCopied += $vcName
